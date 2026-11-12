@@ -1,0 +1,29 @@
+{
+  "name": "threads-machine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Threads Machine — Poster Service (Meta Official API) + Parser Service (Apify)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "dev:once": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json",
+    "test:post": "tsx scripts/test-post.ts",
+    "test:token": "tsx scripts/refresh-token.ts",
+    "test:parse": "tsx scripts/test-parse.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "dotenv": "^17.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

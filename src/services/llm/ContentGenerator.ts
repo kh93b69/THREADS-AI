@@ -1,0 +1,113 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { THREADS_TEXT_LIMIT, config } from "../../config/env.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("llm");
+
+export interface GenerateOptions {
+  /** О чём пост: тема, тезис, черновик. */
+  topic: string;
+  /** Тон: "дружелюбный эксперт", "жёстко по делу" и т.п. */
+  tone?: string;
+  /** Язык поста. */
+  language?: string;
+  /** Примеры удачных тредов — для попадания в стиль. */
+  examples?: string[];
+  /** Жёсткий лимит символов (по умолчанию 500 — лимит Threads). */
+  maxChars?: number;
+}
+
+const SYSTEM_PROMPT = `Ты пишешь посты для Threads.
+
+Правила:
+- Один пост — одна мысль. Сразу по делу, без разогрева и без "в этом посте я расскажу".
+- Первая строка — крючок, который работает сам по себе в ленте.
+- Живой разговорный язык, короткие предложения. Никакого корпоративного тона.
+- Без хэштегов, без эмодзи-мусора (максимум один эмодзи, если он реально нужен).
+- Не используй markdown-разметку: Threads её не рендерит.
+- Отдавай ТОЛЬКО текст поста, без кавычек, преамбул и пояснений.`;
+
+/**
+ * Генерация текста поста через Anthropic Messages API.
+ * Модель и effort берутся из .env (claude-opus-5-5 / low по умолчанию):
+ * задача короткая, поэтому низкий effort экономит токены без потери качества.
+ */
+export class ContentGenerator {
+  private readonly client: Anthropic;
+  private readonly model: string;
+  private readonly effort: "low" | "medium" | "high" | "xhigh" | "max";
+
+  constructor(options?: { apiKey?: string; model?: string }) {
+    this.client = new Anthropic({ apiKey: options?.apiKey ?? config.llm.apiKey });
+    this.model = options?.model ?? config.llm.model;
+    this.effort = config.llm.effort;
+  }
+
+  async generatePost(options: GenerateOptions): Promise<string> {
+    const limit = options.maxChars ?? THREADS_TEXT_LIMIT;
+    const prompt = buildPrompt(options, limit);
+
+    const response = await this.client.beta.messages.create({
+      model: this.model,
+      max_tokens: 2_000,
+      system: SYSTEM_PROMPT,
+      output_config: { effort: this.effort },
+      // Серверный фолбэк: если запрос отклонён политикой, Meta-пост всё равно
+      // будет сгенерирован другой моделью в рамках этого же вызова.
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    if (response.stop_reason === "refusal") {
+      throw new Error(
+        `Модель отказалась генерировать текст: ${response.stop_details?.explanation ?? "без деталей"}`,
+      );
+    }
+
+    const text = response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+
+    if (!text) throw new Error("LLM вернула пустой ответ.");
+
+    log.info("Текст сгенерирован", {
+      length: text.length,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    });
+
+    return enforceLimit(text, limit);
+  }
+}
+
+function buildPrompt(options: GenerateOptions, limit: number): string {
+  const parts = [
+    `Тема поста: ${options.topic}`,
+    `Язык: ${options.language ?? "русский"}`,
+    `Тон: ${options.tone ?? "живой и уверенный, как у практика"}`,
+    `Жёсткий лимит: ${limit} символов включая пробелы. Уложись в него.`,
+  ];
+
+  if (options.examples?.length) {
+    parts.push(
+      "Примеры постов, в стиль которых нужно попасть:",
+      ...options.examples.map((example, i) => `${i + 1}) ${example}`),
+    );
+  }
+
+  return parts.join("\n");
+}
+
+/** Если модель всё же вышла за лимит — режем по границе предложения. */
+function enforceLimit(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+
+  log.warn("LLM превысила лимит — обрезаю по границе предложения", { length: text.length });
+
+  const cut = text.slice(0, limit);
+  const lastStop = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"));
+  return lastStop > limit * 0.5 ? cut.slice(0, lastStop + 1) : cut.trimEnd() + "…";
+}
