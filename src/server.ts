@@ -23,6 +23,8 @@ const API_SECRET = process.env.API_SECRET?.trim();
  *   GET  /health            → проверка живости (Railway пингует её сам)
  *   GET  /auth/start        → получение токена Meta: открыть в браузере
  *   GET  /auth/callback     → сюда Threads возвращает после разрешения доступа
+ *   ANY  /auth/uninstall    → Meta требует заполнить это поле в настройках
+ *   ANY  /auth/delete       → и это тоже, иначе форма не сохраняется
  *   GET  /schedule          → расписание автопостинга и когда следующий пост
  *   POST /publish           → { topic } или { text } → пост в Threads
  *   POST /publish/auto      → пост по контент-плану, прямо сейчас
@@ -49,6 +51,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (route === "GET /auth/start") return authStart(url, res);
   if (route === "GET /auth/callback") return authCallback(url, res);
+
+  // Meta не сохраняет форму настроек, пока не заполнены все три callback-адреса.
+  // Эти два она дёргает, только если пользователь отзывает доступ или удаляет
+  // данные; нам достаточно ответить 200, чтобы она не считала их битыми.
+  if (path === "/auth/uninstall" || path === "/auth/delete") {
+    log.info("Meta дёрнула callback", { path, method: req.method });
+    return json(res, 200, { ok: true });
+  }
 
   if (API_SECRET && req.headers["x-api-secret"] !== API_SECRET) {
     return json(res, 401, { error: "Неверный x-api-secret." });
