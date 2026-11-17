@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { config } from "./config/env.js";
+import { pickTopic } from "./content/topics.js";
 import { runAutoPost } from "./pipeline/autoPost.js";
 import { ContentGenerator } from "./services/llm/ContentGenerator.js";
 import { ApifyParser } from "./services/parser/ApifyParser.js";
@@ -20,6 +21,7 @@ const API_SECRET = process.env.API_SECRET?.trim();
 /**
  * HTTP-обёртка над сервисами — то, что крутится на Railway.
  *
+ *   GET  /panel?secret=...  → страница управления для человека, а не для curl
  *   GET  /health            → проверка живости (Railway пингует её сам)
  *   GET  /auth/start        → получение токена Meta: открыть в браузере
  *   GET  /auth/callback     → сюда Threads возвращает после разрешения доступа
@@ -60,9 +62,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return json(res, 200, { ok: true });
   }
 
-  if (API_SECRET && req.headers["x-api-secret"] !== API_SECRET) {
+  const providedSecret = req.headers["x-api-secret"] ?? url.searchParams.get("secret");
+  if (API_SECRET && providedSecret !== API_SECRET) {
     return json(res, 401, { error: "Неверный x-api-secret." });
   }
+
+  if (route === "GET /panel") return panel(res);
+  if (route === "POST /panel/publish") return panelPublish(res);
 
   switch (route) {
     case "GET /schedule":
@@ -213,6 +219,73 @@ THREADS_USER_ID=${escapeHtml(result.userId)}</pre>
   }
 }
 
+/** Страница управления: всё состояние и кнопка «опубликовать» в одном месте. */
+function panel(res: ServerResponse): void {
+  const times = config.autopost.times;
+  const status = scheduler?.status();
+  const dry = config.dryRun;
+
+  // Что выйдет в ближайшие слоты — тот же расчёт, что у планировщика.
+  const upcoming: string[] = [];
+  for (let i = 0; i < Math.min(4, times.length * 2); i++) {
+    const day = new Date(Date.now() + Math.floor(i / Math.max(times.length, 1)) * 86_400_000);
+    const picked = pickTopic(day, i % Math.max(times.length, 1), times.length);
+    upcoming.push(picked.topic);
+  }
+
+  const secretParam = API_SECRET ? `?secret=${encodeURIComponent(API_SECRET)}` : "";
+
+  html(
+    res,
+    200,
+    `<h1>Threads Machine</h1>
+     <p class="${dry ? "warn" : "ok"}">
+       ${dry
+         ? "⚠️ Холостой режим: посты НЕ публикуются. Чтобы включить по-настоящему, поставь DRY_RUN=false в Railway."
+         : "✅ Боевой режим: посты публикуются по-настоящему."}
+     </p>
+     <h2>Автопостинг</h2>
+     <ul>
+       <li>Включён: <b>${config.autopost.enabled ? "да" : "нет"}</b></li>
+       <li>Расписание: <b>${escapeHtml(times.join(", "))}</b> (${escapeHtml(config.autopost.timezone)})</li>
+       <li>Сейчас там: <b>${escapeHtml(status?.now ?? "—")}</b></li>
+       <li>Следующий пост: <b>${escapeHtml(status?.nextRun ?? "планировщик выключен")}</b></li>
+     </ul>
+     <h2>Что выйдет дальше</h2>
+     <ol>${upcoming.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ol>
+     <h2>Опубликовать прямо сейчас</h2>
+     <form method="POST" action="/panel/publish${secretParam}">
+       <button type="submit">Написать и опубликовать пост</button>
+     </form>
+     <p class="hint">Темы правятся в файле src/content/topics.ts — пушишь в GitHub, Railway сам обновляется.</p>`,
+  );
+}
+
+/** Нажатие кнопки на странице управления. */
+async function panelPublish(res: ServerResponse): Promise<void> {
+  try {
+    const result = await runAutoPost({ slotsPerDay: config.autopost.times.length });
+    const link = result.permalink;
+    return html(
+      res,
+      200,
+      `<h1>${config.dryRun ? "Холостой прогон прошёл" : "Опубликовано"}</h1>
+       <h2>Тема</h2><p>${escapeHtml(result.topic)}</p>
+       <h2>Текст</h2><pre>${escapeHtml(result.text)}</pre>
+       ${link ? `<p><a href="${escapeHtml(link)}">Открыть пост в Threads</a></p>` : ""}
+       ${config.dryRun ? '<p class="warn">Это холостой режим — в Threads ничего не ушло.</p>' : ""}
+       <p><a href="/panel?secret=${encodeURIComponent(API_SECRET ?? "")}">← назад</a></p>`,
+    );
+  } catch (error) {
+    return html(
+      res,
+      502,
+      `<h1>Не получилось</h1><pre>${escapeHtml(ThreadsPoster.explainError(error))}</pre>
+       <p><a href="/panel?secret=${encodeURIComponent(API_SECRET ?? "")}">← назад</a></p>`,
+    );
+  }
+}
+
 /** Ручной запуск того же пайплайна, что крутит планировщик. */
 async function publishAuto(res: ServerResponse): Promise<void> {
   try {
@@ -247,7 +320,12 @@ function html(res: ServerResponse, status: number, body: string): void {
   const page = `<!doctype html><meta charset="utf-8">
 <title>Threads Machine</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem}
-pre{background:#f4f4f5;padding:1rem;border-radius:8px;overflow-x:auto;white-space:pre-wrap;word-break:break-all}</style>
+pre{background:#f4f4f5;padding:1rem;border-radius:8px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+button{font:inherit;padding:.7rem 1.2rem;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer}
+.warn{background:#fff4e5;padding:.8rem 1rem;border-radius:8px}
+.ok{background:#e8f6ec;padding:.8rem 1rem;border-radius:8px}
+.hint{color:#666;font-size:.9rem}
+a{color:#0a58ca}</style>
 ${body}`;
   res.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
