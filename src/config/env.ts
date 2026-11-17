@@ -42,8 +42,14 @@ export const config = {
     get appSecret(): string {
       return str("THREADS_APP_SECRET");
     },
-    /** Должен совпадать байт в байт с тем, что вписан в настройках Meta. */
+    /**
+     * Должен совпадать байт в байт с тем, что сохранено в настройках Meta.
+     * Дашборд Meta иногда сам дописывает слеш в конце — тогда задай
+     * THREADS_REDIRECT_URI ровно тем значением, которое видно в настройках.
+     */
     get redirectUri(): string {
+      const explicit = optional("THREADS_REDIRECT_URI");
+      if (explicit) return explicit;
       return `${str("PUBLIC_URL").replace(/\/$/, "")}/auth/callback`;
     },
     get userId(): string {

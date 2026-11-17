@@ -39,7 +39,9 @@ const server = createServer((req, res) => {
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
-  const route = `${req.method} ${url.pathname}`;
+  // Слеш в конце пути игнорируем: Meta может вернуть на /auth/callback/
+  const path = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, "") : url.pathname;
+  const route = `${req.method} ${path}`;
 
   if (route === "GET /health") {
     return json(res, 200, { ok: true, uptime: Math.round(process.uptime()) });
@@ -136,7 +138,13 @@ function authStart(url: URL, res: ServerResponse): void {
          <p><b>scope</b>:</p>
          <pre>${escapeHtml(parsed.searchParams.get("scope") ?? "")}</pre>
          <p>Полная ссылка авторизации:</p>
-         <pre>${escapeHtml(target)}</pre>`,
+         <pre>${escapeHtml(target)}</pre>
+         <p>Если Meta отвечает «URL заблокирован», сравни redirect_uri выше с тем,
+         что сохранено в настройках приложения. Дашборд иногда сам дописывает слеш.
+         Вариант со слешем, который может ждать Meta:</p>
+         <pre>${escapeHtml(parsed.searchParams.get("redirect_uri") ?? "")}/</pre>
+         <p>Чтобы послать именно его, задай переменную
+         <code>THREADS_REDIRECT_URI</code> этим значением.</p>`,
       );
     }
 
