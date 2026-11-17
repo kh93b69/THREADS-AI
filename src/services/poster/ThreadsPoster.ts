@@ -122,12 +122,14 @@ export class ThreadsPoster {
   async publish(input: CreatePostInput): Promise<PublishResult> {
     const containerId = await this.createContainer(input);
 
-    const mediaType = input.mediaType ?? "TEXT";
-    if (mediaType !== "TEXT" && !this.dryRun) {
+    // Ждём готовности контейнера ВСЕГДА, включая текстовые посты.
+    // Meta рекомендует в среднем 30 секунд: при публикации сразу после
+    // создания приходит 400 "The requested resource does not exist".
+    if (!this.dryRun) {
       await this.waitForContainer(containerId);
     }
 
-    const threadId = await this.publishContainer(containerId);
+    const threadId = await this.publishWithRetry(containerId);
 
     return {
       containerId,
@@ -137,24 +139,76 @@ export class ThreadsPoster {
     };
   }
 
-  /** Опрос статуса контейнера — нужен для IMAGE/VIDEO. */
-  async waitForContainer(containerId: string, attempts = 10, intervalMs = 5_000): Promise<void> {
+  /**
+   * Ждём, пока контейнер станет публикуемым.
+   *
+   * Статус может быть недоступен первые секунды — сразу после создания Meta
+   * отвечает ошибкой на запрос самого контейнера. Это не повод падать:
+   * считаем такие ответы за «ещё не готов» и продолжаем опрашивать.
+   * Если статус так и не отдался, всё равно пробуем опубликовать: для
+   * текстовых постов публикация часто проходит и без него.
+   */
+  async waitForContainer(containerId: string, attempts = 12, intervalMs = 5_000): Promise<void> {
     for (let i = 0; i < attempts; i++) {
-      const data = await request<ContainerStatusResponse>(this.url(containerId), {
-        query: { fields: "status,error_message", access_token: this.accessToken },
-      });
+      try {
+        const data = await request<ContainerStatusResponse>(this.url(containerId), {
+          query: { fields: "status,error_message", access_token: this.accessToken },
+          retries: 0,
+        });
 
-      log.debug("Статус контейнера", { containerId, status: data.status, attempt: i + 1 });
+        log.debug("Статус контейнера", { containerId, status: data.status, attempt: i + 1 });
 
-      if (data.status === "FINISHED") return;
-      if (data.status === "ERROR" || data.status === "EXPIRED") {
-        throw new Error(
-          `Контейнер ${containerId} в статусе ${data.status}: ${data.error_message ?? "без деталей"}`,
-        );
+        if (data.status === "FINISHED" || data.status === "PUBLISHED") return;
+        if (data.status === "ERROR" || data.status === "EXPIRED") {
+          throw new Error(
+            `Контейнер ${containerId} в статусе ${data.status}: ${data.error_message ?? "без деталей"}`,
+          );
+        }
+      } catch (error) {
+        // Статус контейнера в состоянии ERROR/EXPIRED — это наша же ошибка выше,
+        // её пробрасываем. Всё остальное считаем «пока не готов».
+        if (error instanceof Error && error.message.startsWith("Контейнер ")) throw error;
+        log.debug("Статус пока недоступен", { containerId, attempt: i + 1 });
       }
+
       await sleep(intervalMs);
     }
-    throw new Error(`Контейнер ${containerId} не перешёл в FINISHED за отведённое время.`);
+
+    log.warn("Статус контейнера так и не стал FINISHED, пробую публиковать как есть", {
+      containerId,
+    });
+  }
+
+  /**
+   * Публикация с повтором: даже после ожидания Meta иногда отвечает, что
+   * контейнера не существует. Обычно это проходит само через несколько секунд.
+   */
+  private async publishWithRetry(containerId: string, attempts = 4): Promise<string> {
+    let lastError: unknown;
+
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await this.publishContainer(containerId);
+      } catch (error) {
+        lastError = error;
+
+        const notReady =
+          error instanceof HttpError &&
+          error.status === 400 &&
+          /does not exist|cannot be found|не существует/i.test(error.message);
+
+        if (!notReady || i === attempts - 1) break;
+
+        const delay = 10_000 * (i + 1);
+        log.warn(`Контейнер ещё не опубликовать, жду ${delay / 1000} с`, {
+          containerId,
+          attempt: i + 1,
+        });
+        await sleep(delay);
+      }
+    }
+
+    throw lastError;
   }
 
   async getPermalink(threadId: string): Promise<string | undefined> {
