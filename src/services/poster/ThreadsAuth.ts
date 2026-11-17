@@ -4,6 +4,16 @@ import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("auth");
 
+/** Meta ругается на redirect_uri кодом 191 / сообщением "Invalid redirect_uri". */
+function isRedirectUriError(error: unknown): boolean {
+  return error instanceof Error && /redirect_uri/i.test(error.message);
+}
+
+/** Со слешем в конце ↔ без него. */
+function toggleTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.replace(/\/+$/, "") : `${value}/`;
+}
+
 /** Страница авторизации, куда уходит пользователь. Это не graph-хост. */
 const THREADS_AUTHORIZE_URL = "https://threads.com/oauth/authorize";
 
@@ -59,7 +69,23 @@ export class ThreadsAuth {
     // Threads иногда добавляет "#_" в хвост кода — это не часть кода.
     const cleanCode = code.replace(/#_$/, "");
 
-    const short = await this.exchangeCodeForShortLived(cleanCode);
+    // Дашборд Meta нормализует слеш в конце по-разному на шаге авторизации и
+    // на обмене кода, поэтому при ошибке redirect_uri пробуем второй вариант
+    // написания и подсказываем, какой из них прижился.
+    let short: ShortLivedResponse;
+    try {
+      short = await this.exchangeCodeForShortLived(cleanCode, this.redirectUri);
+    } catch (error) {
+      if (!isRedirectUriError(error)) throw error;
+
+      const alternative = toggleTrailingSlash(this.redirectUri);
+      log.warn("redirect_uri не подошёл, пробую второй вариант", { alternative });
+
+      short = await this.exchangeCodeForShortLived(cleanCode, alternative);
+      log.warn(
+        `Сработал вариант со слешем иначе. Пропиши его в THREADS_REDIRECT_URI: ${alternative}`,
+      );
+    }
     const long = await this.exchangeForLongLived(short.access_token);
 
     return {
@@ -70,14 +96,17 @@ export class ThreadsAuth {
     };
   }
 
-  private async exchangeCodeForShortLived(code: string): Promise<ShortLivedResponse> {
+  private async exchangeCodeForShortLived(
+    code: string,
+    redirectUri: string,
+  ): Promise<ShortLivedResponse> {
     // Этот шаг — form-urlencoded POST, а не JSON: требование Meta.
     const body = new URLSearchParams({
       client_id: this.appId,
       client_secret: this.appSecret,
       code,
       grant_type: "authorization_code",
-      redirect_uri: this.redirectUri,
+      redirect_uri: redirectUri,
     });
 
     const response = await fetch(`${THREADS_GRAPH_BASE}/oauth/access_token`, {
