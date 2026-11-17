@@ -109,7 +109,7 @@ async function publish(body: Record<string, unknown>, res: ServerResponse): Prom
  * Одноразовые state для OAuth: защита от того, что кто-то дёрнет /auth/callback
  * со своим кодом. Живут в памяти — этого достаточно, поток занимает полминуты.
  */
-const pendingStates = new Set<string>();
+const pendingStates = new Map<string, string>();
 
 /**
  * Старт OAuth. Открывается в браузере, поэтому заголовок передать нельзя —
@@ -121,12 +121,15 @@ function authStart(url: URL, res: ServerResponse): void {
   }
 
   try {
+    const auth = new ThreadsAuth();
     const state = randomUUID();
-    pendingStates.add(state);
+    // Запоминаем redirect_uri именно этой попытки: на обмене кода Meta требует
+    // ровно его, даже если переменные окружения успели поменяться.
+    pendingStates.set(state, auth.currentRedirectUri);
     // Чтобы забытые state не копились, если поток бросили на половине.
     setTimeout(() => pendingStates.delete(state), 10 * 60_000).unref();
 
-    const target = new ThreadsAuth().buildAuthorizeUrl(state);
+    const target = auth.buildAuthorizeUrl(state);
 
     // ?debug=1 — не редиректим, а показываем, что именно уходит в Meta.
     // Нужно, когда Meta отвечает "URL заблокирован" (код 1349168):
@@ -174,7 +177,8 @@ async function authCallback(url: URL, res: ServerResponse): Promise<void> {
   }
 
   const state = url.searchParams.get("state");
-  if (!state || !pendingStates.delete(state)) {
+  const usedRedirectUri = state ? pendingStates.get(state) : undefined;
+  if (!state || !usedRedirectUri) {
     return html(
       res,
       400,
@@ -182,11 +186,13 @@ async function authCallback(url: URL, res: ServerResponse): Promise<void> {
     );
   }
 
+  pendingStates.delete(state);
+
   const code = url.searchParams.get("code");
   if (!code) return html(res, 400, "<h1>Нет параметра code</h1>");
 
   try {
-    const result = await new ThreadsAuth().exchangeCode(code);
+    const result = await new ThreadsAuth().exchangeCode(code, usedRedirectUri);
     log.info("Токен получен, осталось записать его в переменные Railway", {
       userId: result.userId,
       expiresAt: result.expiresAt,

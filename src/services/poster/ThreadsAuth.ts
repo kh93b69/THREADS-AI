@@ -4,16 +4,6 @@ import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("auth");
 
-/** Meta ругается на redirect_uri кодом 191 / сообщением "Invalid redirect_uri". */
-function isRedirectUriError(error: unknown): boolean {
-  return error instanceof Error && /redirect_uri/i.test(error.message);
-}
-
-/** Со слешем в конце ↔ без него. */
-function toggleTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value.replace(/\/+$/, "") : `${value}/`;
-}
-
 /** Страница авторизации, куда уходит пользователь. Это не graph-хост. */
 const THREADS_AUTHORIZE_URL = "https://threads.com/oauth/authorize";
 
@@ -54,6 +44,10 @@ export class ThreadsAuth {
   ) {}
 
   /** Ссылка, по которой пользователь даёт доступ. */
+  get currentRedirectUri(): string {
+    return this.redirectUri;
+  }
+
   buildAuthorizeUrl(state: string): string {
     const url = new URL(THREADS_AUTHORIZE_URL);
     url.searchParams.set("client_id", this.appId);
@@ -65,27 +59,14 @@ export class ThreadsAuth {
   }
 
   /** Шаги 2 и 3 разом: из кода с редиректа — сразу долгоживущий токен. */
-  async exchangeCode(code: string): Promise<AuthResult> {
+  async exchangeCode(code: string, usedRedirectUri?: string): Promise<AuthResult> {
     // Threads иногда добавляет "#_" в хвост кода — это не часть кода.
     const cleanCode = code.replace(/#_$/, "");
 
-    // Дашборд Meta нормализует слеш в конце по-разному на шаге авторизации и
-    // на обмене кода, поэтому при ошибке redirect_uri пробуем второй вариант
-    // написания и подсказываем, какой из них прижился.
-    let short: ShortLivedResponse;
-    try {
-      short = await this.exchangeCodeForShortLived(cleanCode, this.redirectUri);
-    } catch (error) {
-      if (!isRedirectUriError(error)) throw error;
-
-      const alternative = toggleTrailingSlash(this.redirectUri);
-      log.warn("redirect_uri не подошёл, пробую второй вариант", { alternative });
-
-      short = await this.exchangeCodeForShortLived(cleanCode, alternative);
-      log.warn(
-        `Сработал вариант со слешем иначе. Пропиши его в THREADS_REDIRECT_URI: ${alternative}`,
-      );
-    }
+    // redirect_uri на обмене обязан совпадать с тем, что ушёл в диалог
+    // авторизации, иначе Meta отвечает 36008. Поэтому берём не текущий конфиг,
+    // а ровно то значение, с которым этот code был выписан.
+    const short = await this.exchangeCodeForShortLived(cleanCode, usedRedirectUri ?? this.redirectUri);
     const long = await this.exchangeForLongLived(short.access_token);
 
     return {
