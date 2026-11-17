@@ -81,17 +81,7 @@ export class ContentGenerator {
       return enforceLimit(stub, limit);
     }
 
-    const response = await this.anthropic.beta.messages.create({
-      model: this.model,
-      max_tokens: 2_000,
-      system: SYSTEM_PROMPT,
-      output_config: { effort: config.llm.effort },
-      // Серверный фолбэк: если запрос отклонён политикой, Meta-пост всё равно
-      // будет сгенерирован другой моделью в рамках этого же вызова.
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      messages: [{ role: "user", content: prompt }],
-    });
+    const response = await this.callModel(prompt);
 
     if (response.stop_reason === "refusal") {
       throw new Error(
@@ -115,6 +105,48 @@ export class ContentGenerator {
 
     return enforceLimit(text, limit);
   }
+
+  /** Вызов модели с переводом ошибок API в понятные сообщения. */
+  private async callModel(prompt: string) {
+    try {
+      return await this.anthropic.beta.messages.create({
+        model: this.model,
+        max_tokens: 2_000,
+        system: SYSTEM_PROMPT,
+        output_config: { effort: config.llm.effort },
+        // Серверный фолбэк: если запрос отклонён политикой, текст всё равно
+        // будет сгенерирован другой моделью в рамках этого же вызова.
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: "default",
+        messages: [{ role: "user", content: prompt }],
+      });
+    } catch (error) {
+      throw new Error(explainLlmError(error));
+    }
+  }
+}
+
+/** Частые ошибки Anthropic — текстом, который понятно что делать. */
+function explainLlmError(error: unknown): string {
+  if (error instanceof Anthropic.AuthenticationError) {
+    return "Ключ Anthropic неверный или не задан. Проверь переменную ANTHROPIC_API_KEY в Railway: она должна начинаться с sk-ant- и быть скопирована целиком, без пробелов.";
+  }
+  if (error instanceof Anthropic.PermissionDeniedError) {
+    return "Ключ Anthropic не имеет доступа к этой модели. Проверь модель в переменной LLM_MODEL.";
+  }
+  if (error instanceof Anthropic.RateLimitError) {
+    return "Упёрлись в лимит запросов Anthropic. Подожди минуту и повтори.";
+  }
+  if (error instanceof Anthropic.NotFoundError) {
+    return `Модель не найдена. Проверь LLM_MODEL — сейчас там то, чего у Anthropic нет. ${error.message}`;
+  }
+  if (error instanceof Anthropic.APIConnectionError) {
+    return "Не достучались до Anthropic — сеть или их недоступность. Повтори позже.";
+  }
+  if (error instanceof Anthropic.APIError) {
+    return `Anthropic вернул ошибку ${error.status ?? "?"}: ${error.message}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function buildPrompt(options: GenerateOptions, limit: number): string {
