@@ -33,25 +33,38 @@ const SYSTEM_PROMPT = `Ты пишешь посты для Threads.
  * задача короткая, поэтому низкий effort экономит токены без потери качества.
  */
 export class ContentGenerator {
-  private readonly client: Anthropic;
+  private client: Anthropic | null = null;
+  private readonly apiKey: string | undefined;
   private readonly model: string;
-  private readonly effort: "low" | "medium" | "high" | "xhigh" | "max";
 
   constructor(options?: { apiKey?: string; model?: string }) {
-    this.client = new Anthropic({ apiKey: options?.apiKey ?? config.llm.apiKey });
+    // Ключ не трогаем в конструкторе: в DRY_RUN его может не быть вовсе.
+    this.apiKey = options?.apiKey;
     this.model = options?.model ?? config.llm.model;
-    this.effort = config.llm.effort;
+  }
+
+  private get anthropic(): Anthropic {
+    this.client ??= new Anthropic({ apiKey: this.apiKey ?? config.llm.apiKey });
+    return this.client;
   }
 
   async generatePost(options: GenerateOptions): Promise<string> {
     const limit = options.maxChars ?? THREADS_TEXT_LIMIT;
     const prompt = buildPrompt(options, limit);
 
-    const response = await this.client.beta.messages.create({
+    // Холостой прогон без ключа Anthropic: проверить расписание и публикацию
+    // можно до того, как появятся все токены.
+    if (config.dryRun && !this.apiKey && !process.env["ANTHROPIC_API_KEY"]) {
+      const stub = `[DRY_RUN] Заглушка вместо текста LLM. Тема: ${options.topic}`;
+      log.warn("DRY_RUN без ANTHROPIC_API_KEY — возвращаю заглушку");
+      return enforceLimit(stub, limit);
+    }
+
+    const response = await this.anthropic.beta.messages.create({
       model: this.model,
       max_tokens: 2_000,
       system: SYSTEM_PROMPT,
-      output_config: { effort: this.effort },
+      output_config: { effort: config.llm.effort },
       // Серверный фолбэк: если запрос отклонён политикой, Meta-пост всё равно
       // будет сгенерирован другой моделью в рамках этого же вызова.
       betas: ["server-side-fallback-2026-07-01"],

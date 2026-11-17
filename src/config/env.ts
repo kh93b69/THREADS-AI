@@ -60,6 +60,22 @@ export const config = {
     },
   },
 
+  autopost: {
+    get enabled(): boolean {
+      return bool("AUTOPOST_ENABLED", false);
+    },
+    /** Времена публикации "HH:MM" через запятую, в зоне timezone. */
+    get times(): string[] {
+      return str("POST_TIMES", "10:00,19:00")
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0);
+    },
+    get timezone(): string {
+      return str("TIMEZONE", "Europe/Moscow");
+    },
+  },
+
   apify: {
     get token(): string {
       return str("APIFY_TOKEN");

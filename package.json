@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json",
     "test:post": "tsx scripts/test-post.ts",
     "test:token": "tsx scripts/refresh-token.ts",
-    "test:parse": "tsx scripts/test-parse.ts"
+    "test:parse": "tsx scripts/test-parse.ts",
+    "test:schedule": "tsx scripts/test-schedule.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",

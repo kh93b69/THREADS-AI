@@ -1,9 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { config } from "./config/env.js";
+import { runAutoPost } from "./pipeline/autoPost.js";
 import { ContentGenerator } from "./services/llm/ContentGenerator.js";
 import { ApifyParser } from "./services/parser/ApifyParser.js";
 import { MockParser } from "./services/parser/MockParser.js";
 import type { ThreadsParser } from "./services/parser/ThreadsParser.js";
 import { ThreadsPoster } from "./services/poster/ThreadsPoster.js";
+import { Scheduler } from "./services/scheduler/Scheduler.js";
 import { createLogger } from "./utils/logger.js";
 
 const log = createLogger("server");
@@ -16,7 +19,9 @@ const API_SECRET = process.env.API_SECRET?.trim();
  * HTTP-обёртка над сервисами — то, что крутится на Railway.
  *
  *   GET  /health            → проверка живости (Railway пингует её сам)
+ *   GET  /schedule          → расписание автопостинга и когда следующий пост
  *   POST /publish           → { topic } или { text } → пост в Threads
+ *   POST /publish/auto      → пост по контент-плану, прямо сейчас
  *   POST /parse             → { keywords: string[] } → треды конкурентов
  *
  * Авторизация: заголовок `x-api-secret` должен совпасть с API_SECRET.
@@ -41,6 +46,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   switch (route) {
+    case "GET /schedule":
+      return json(res, 200, {
+        autopostEnabled: config.autopost.enabled,
+        ...(scheduler ? scheduler.status() : { note: "Планировщик выключен (AUTOPOST_ENABLED=false)." }),
+      });
+    case "POST /publish/auto":
+      return publishAuto(res);
     case "POST /publish":
       return publish(await readJson(req), res);
     case "POST /parse":
@@ -71,6 +83,16 @@ async function publish(body: Record<string, unknown>, res: ServerResponse): Prom
     return json(res, 200, { ...result, text });
   } catch (error) {
     return json(res, 502, { error: ThreadsPoster.explainError(error), text });
+  }
+}
+
+/** Ручной запуск того же пайплайна, что крутит планировщик. */
+async function publishAuto(res: ServerResponse): Promise<void> {
+  try {
+    const result = await runAutoPost({ slotsPerDay: config.autopost.times.length });
+    return json(res, 200, result);
+  } catch (error) {
+    return json(res, 502, { error: ThreadsPoster.explainError(error) });
   }
 }
 
@@ -123,15 +145,29 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   }
 }
 
+let scheduler: Scheduler | null = null;
+
+if (config.autopost.enabled) {
+  scheduler = new Scheduler({
+    times: config.autopost.times,
+    timezone: config.autopost.timezone,
+    job: (slotIndex, slotsPerDay) => runAutoPost({ slotIndex, slotsPerDay }),
+  });
+}
+
 server.listen(PORT, () => {
   log.info(`Слушаю порт ${PORT}`, { authEnabled: Boolean(API_SECRET) });
-  if (!API_SECRET) log.warn("API_SECRET не задан — /publish и /parse открыты всем!");
+  if (!API_SECRET) log.warn("API_SECRET не задан — эндпоинты открыты всем!");
+
+  if (scheduler) scheduler.start();
+  else log.info("Автопостинг выключен: AUTOPOST_ENABLED=false");
 });
 
 // Railway присылает SIGTERM при редеплое — закрываемся аккуратно.
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
     log.info(`Получен ${signal}, останавливаюсь`);
+    scheduler?.stop();
     server.close(() => process.exit(0));
   });
 }
