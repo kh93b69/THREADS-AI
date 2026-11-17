@@ -115,6 +115,31 @@ function authStart(url: URL, res: ServerResponse): void {
     setTimeout(() => pendingStates.delete(state), 10 * 60_000).unref();
 
     const target = new ThreadsAuth().buildAuthorizeUrl(state);
+
+    // ?debug=1 — не редиректим, а показываем, что именно уходит в Meta.
+    // Нужно, когда Meta отвечает "URL заблокирован" (код 1349168):
+    // почти всегда виноват client_id от основного приложения вместо Threads,
+    // либо redirect_uri, не совпавший с зарегистрированным байт в байт.
+    if (url.searchParams.get("debug") === "1") {
+      const parsed = new URL(target);
+      pendingStates.delete(state);
+      return html(
+        res,
+        200,
+        `<h1>Что уйдёт в Meta</h1>
+         <p><b>client_id</b> — должен совпадать с «ID приложения Threads» в Настройках,
+         а не с ID основного приложения:</p>
+         <pre>${escapeHtml(parsed.searchParams.get("client_id") ?? "")}</pre>
+         <p><b>redirect_uri</b> — должен совпадать с «Авторизация URL обратного вызова»
+         символ в символ, без слеша в конце:</p>
+         <pre>${escapeHtml(parsed.searchParams.get("redirect_uri") ?? "")}</pre>
+         <p><b>scope</b>:</p>
+         <pre>${escapeHtml(parsed.searchParams.get("scope") ?? "")}</pre>
+         <p>Полная ссылка авторизации:</p>
+         <pre>${escapeHtml(target)}</pre>`,
+      );
+    }
+
     log.info("Отправляю на авторизацию Threads");
     res.writeHead(302, { Location: target });
     res.end();
