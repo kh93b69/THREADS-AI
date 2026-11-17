@@ -141,8 +141,8 @@ function authStart(url: URL, res: ServerResponse): void {
          <pre>${escapeHtml(target)}</pre>
          <p>Если Meta отвечает «URL заблокирован», сравни redirect_uri выше с тем,
          что сохранено в настройках приложения. Дашборд иногда сам дописывает слеш.
-         Вариант со слешем, который может ждать Meta:</p>
-         <pre>${escapeHtml(parsed.searchParams.get("redirect_uri") ?? "")}/</pre>
+         Альтернативное написание, которое может ждать Meta:</p>
+         <pre>${escapeHtml(toggleTrailingSlash(parsed.searchParams.get("redirect_uri") ?? ""))}</pre>
          <p>Чтобы послать именно его, задай переменную
          <code>THREADS_REDIRECT_URI</code> этим значением.</p>`,
       );
@@ -238,6 +238,11 @@ ${body}`;
     "Content-Length": Buffer.byteLength(page),
   });
   res.end(page);
+}
+
+/** Со слешем в конце ↔ без него: второй вариант для сверки с настройками Meta. */
+function toggleTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.replace(/\/+$/, "") : `${value}/`;
 }
 
 function escapeHtml(value: string): string {
