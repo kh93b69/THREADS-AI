@@ -1,5 +1,5 @@
 import { THREADS_GRAPH_BASE, THREADS_TEXT_LIMIT, config } from "../../config/env.js";
-import type { CreatePostInput, PublishResult, ThreadsMediaType } from "../../types/index.js";
+import type { CreatePostInput, PostStats, PublishResult, ThreadsMediaType } from "../../types/index.js";
 import { HttpError, request, sleep } from "../../utils/http.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -162,6 +162,78 @@ export class ThreadsPoster {
       query: { fields: "permalink", access_token: this.accessToken },
     });
     return data.permalink;
+  }
+
+  /**
+   * Последние посты аккаунта со статистикой.
+   * Требует прав threads_manage_insights (просмотры, лайки) и
+   * threads_read_replies (комментарии) — если токен выдан без них,
+   * Meta вернёт 403, и это честно пробросится наверх.
+   */
+  async getRecentPostsWithInsights(limit = 10, sinceMs?: number): Promise<PostStats[]> {
+    const list = await request<{ data?: Array<{ id: string; text?: string; timestamp?: string; permalink?: string }> }>(
+      this.url(`${this.userId}/threads`),
+      {
+        query: {
+          fields: "id,text,timestamp,permalink",
+          limit,
+          access_token: this.accessToken,
+        },
+      },
+    );
+
+    const posts = (list.data ?? []).filter((post) => {
+      if (sinceMs === undefined || !post.timestamp) return true;
+      return new Date(post.timestamp).getTime() >= sinceMs;
+    });
+
+    // Статистику Meta отдаёт только по одному посту за запрос.
+    return Promise.all(posts.map((post) => this.withInsights(post)));
+  }
+
+  private async withInsights(post: {
+    id: string;
+    text?: string;
+    timestamp?: string;
+    permalink?: string;
+  }): Promise<PostStats> {
+    const base: PostStats = {
+      id: post.id,
+      text: post.text ?? "",
+      permalink: post.permalink,
+      postedAt: post.timestamp ?? null,
+      views: 0,
+      likes: 0,
+      replies: 0,
+      reposts: 0,
+      quotes: 0,
+      shares: 0,
+    };
+
+    try {
+      const data = await request<{ data?: Array<{ name: string; values?: Array<{ value: number }> }> }>(
+        this.url(`${post.id}/insights`),
+        {
+          query: {
+            metric: "views,likes,replies,reposts,quotes,shares",
+            access_token: this.accessToken,
+          },
+        },
+      );
+
+      for (const metric of data.data ?? []) {
+        const value = metric.values?.[0]?.value ?? 0;
+        if (metric.name in base) {
+          (base as unknown as Record<string, number>)[metric.name] = value;
+        }
+      }
+    } catch (error) {
+      // Пост мог быть слишком свежим или прав не хватает: остальная сводка
+      // важнее, чем падение из-за одной строки.
+      log.warn("Нет статистики по посту", { id: post.id, error: String(error) });
+    }
+
+    return base;
   }
 
   /** Проверка токена и доступа: GET /me. Удобно вызывать на старте. */

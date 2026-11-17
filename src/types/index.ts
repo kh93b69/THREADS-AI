@@ -47,3 +47,17 @@ export interface ParseOptions {
   /** Не брать посты старше N дней. */
   maxAgeDays?: number;
 }
+
+/** Статистика поста для ежедневной сводки. */
+export interface PostStats {
+  id: string;
+  text: string;
+  permalink?: string;
+  postedAt: string | null;
+  views: number;
+  likes: number;
+  replies: number;
+  reposts: number;
+  quotes: number;
+  shares: number;
+}

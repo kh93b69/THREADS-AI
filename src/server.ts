@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { config } from "./config/env.js";
 import { pickTopic } from "./content/topics.js";
 import { runAutoPost } from "./pipeline/autoPost.js";
+import { digestEnabled, digestTime, runDailyDigest } from "./pipeline/dailyDigest.js";
 import { ContentGenerator } from "./services/llm/ContentGenerator.js";
 import { ApifyParser } from "./services/parser/ApifyParser.js";
 import { MockParser } from "./services/parser/MockParser.js";
@@ -31,6 +32,7 @@ const API_SECRET = process.env.API_SECRET?.trim();
  *   GET  /schedule          → расписание автопостинга и когда следующий пост
  *   POST /publish           → { topic } или { text } → пост в Threads
  *   POST /publish/auto      → пост по контент-плану, прямо сейчас
+ *   POST /panel/digest      → собрать и отправить сводку прямо сейчас
  *   POST /parse             → { keywords: string[] } → треды конкурентов
  *
  * Авторизация: заголовок `x-api-secret` должен совпасть с API_SECRET.
@@ -70,6 +72,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (route === "GET /panel") return panel(res);
   if (route === "POST /panel/publish") return panelPublish(res);
+  if (route === "POST /panel/digest") return panelDigest(res);
   if (route === "GET /tg/setup") return tgSetup(res);
   if (route === "POST /tg/test") return tgTest(res);
 
@@ -222,6 +225,33 @@ THREADS_USER_ID=${escapeHtml(result.userId)}</pre>
   }
 }
 
+/** Кнопка «прислать сводку сейчас» — не дожидаясь вечера. */
+async function panelDigest(res: ServerResponse): Promise<void> {
+  const secretParam = API_SECRET ? `?secret=${encodeURIComponent(API_SECRET)}` : "";
+  try {
+    const result = await runDailyDigest(1);
+    return html(
+      res,
+      200,
+      `<h1>Сводка собрана</h1>
+       <p>Постов за сутки: <b>${result.posts.length}</b>.
+       ${result.sent ? "Отправлена в Телеграм." : "В Телеграм не ушла — он не настроен."}</p>
+       <pre>${escapeHtml(result.text.replace(/<\/?b>/g, ""))}</pre>
+       <p><a href="/panel${secretParam}">← назад</a></p>`,
+    );
+  } catch (error) {
+    return html(
+      res,
+      502,
+      `<h1>Не получилось собрать сводку</h1>
+       <pre>${escapeHtml(ThreadsPoster.explainError(error))}</pre>
+       <p class="hint">Если ошибка про права — пройди /auth/start заново: статистику
+       отдают только по токену с threads_manage_insights и threads_read_replies.</p>
+       <p><a href="/panel${secretParam}">← назад</a></p>`,
+    );
+  }
+}
+
 /** Показывает chat_id всех, кто писал боту — чтобы не лезть в API руками. */
 async function tgSetup(res: ServerResponse): Promise<void> {
   const secretParam = API_SECRET ? `?secret=${encodeURIComponent(API_SECRET)}` : "";
@@ -331,8 +361,14 @@ function panel(res: ServerResponse): void {
        <form method="POST" action="/tg/test${secretParam}" style="display:inline">
          <button type="submit">Отправить тестовое сообщение</button>
        </form>
-       &nbsp;<a href="/tg/setup${secretParam}">Найти мой chat_id</a>
+       &nbsp;&nbsp;<a href="/tg/setup${secretParam}">Найти мой chat_id</a>
      </p>
+     <h2>Сводка по постам</h2>
+     <p>Приходит в Телеграм каждый день в <b>${escapeHtml(digestTime())}</b>
+     (${escapeHtml(config.autopost.timezone)}): просмотры, лайки, комментарии, вовлечённость.</p>
+     <form method="POST" action="/panel/digest${secretParam}">
+       <button type="submit">Прислать сводку сейчас</button>
+     </form>
      <p class="hint">Темы правятся в файле src/content/topics.ts — пушишь в GitHub, Railway сам обновляется.</p>`,
   );
 }
@@ -454,6 +490,15 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 let scheduler: Scheduler | null = null;
+let digestScheduler: Scheduler | null = null;
+
+if (digestEnabled()) {
+  digestScheduler = new Scheduler({
+    times: [digestTime()],
+    timezone: config.autopost.timezone,
+    job: () => runDailyDigest(1),
+  });
+}
 
 if (config.autopost.enabled) {
   scheduler = new Scheduler({
@@ -469,6 +514,11 @@ server.listen(PORT, () => {
 
   if (scheduler) scheduler.start();
   else log.info("Автопостинг выключен: AUTOPOST_ENABLED=false");
+
+  if (digestScheduler) {
+    digestScheduler.start();
+    log.info(`Ежедневная сводка в ${digestTime()}`);
+  }
 });
 
 // Railway присылает SIGTERM при редеплое — закрываемся аккуратно.
@@ -476,6 +526,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
     log.info(`Получен ${signal}, останавливаюсь`);
     scheduler?.stop();
+    digestScheduler?.stop();
     server.close(() => process.exit(0));
   });
 }
