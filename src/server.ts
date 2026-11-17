@@ -326,7 +326,7 @@ function panel(res: ServerResponse): void {
   for (let i = 0; i < Math.min(4, times.length * 2); i++) {
     const day = new Date(Date.now() + Math.floor(i / Math.max(times.length, 1)) * 86_400_000);
     const picked = pickTopic(day, i % Math.max(times.length, 1), times.length);
-    upcoming.push(picked.topic);
+    upcoming.push(picked.format === "short" ? `[короткий] ${picked.topic}` : picked.topic);
   }
 
   const secretParam = API_SECRET ? `?secret=${encodeURIComponent(API_SECRET)}` : "";

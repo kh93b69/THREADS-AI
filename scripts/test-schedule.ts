@@ -4,7 +4,7 @@
  *
  * Ничего не публикует и не тратит токены: только считает ротацию.
  */
-import { DEFAULT_TONE, TOPICS, pickTopic } from "../src/content/topics.js";
+import { TOPICS, pickTopic } from "../src/content/topics.js";
 import { config } from "../src/config/env.js";
 import { formatInZone, normalizeTime } from "../src/services/scheduler/Scheduler.js";
 
@@ -30,8 +30,9 @@ while (shown < slotsToShow) {
     if (shown >= slotsToShow) break;
 
     const picked = pickTopic(day, slotIndex, times.length);
-    console.log(`${date} ${slotTime}  ${picked.topic}`);
-    console.log(`                  тон: ${picked.tone ?? DEFAULT_TONE}\n`);
+    const mark = picked.format === "short" ? " [короткий]" : "";
+    console.log(`${date} ${slotTime}${mark}  ${picked.topic}`);
+    console.log(`                  концовка: ${picked.cta ?? "без призыва"}\n`);
     shown++;
   }
   dayOffset++;

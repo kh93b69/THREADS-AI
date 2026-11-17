@@ -7,6 +7,8 @@ const log = createLogger("llm");
 export interface GenerateOptions {
   /** Чем закончить пост: вопрос, провокация, призыв протестить. */
   ctaRule?: string;
+  /** Правила короткого формата, если пост короткий. */
+  formatRule?: string;
   /** О чём пост: тема, тезис, черновик. */
   topic: string;
   /** Тон: "дружелюбный эксперт", "жёстко по делу" и т.п. */
@@ -163,12 +165,16 @@ function explainLlmError(error: unknown): string {
 }
 
 function buildPrompt(options: GenerateOptions, limit: number): string {
-  const parts = [
+  const parts = [];
+
+  if (options.formatRule) parts.push(options.formatRule, "");
+
+  parts.push(
     `Тема поста: ${options.topic}`,
     `Язык: ${options.language ?? "русский"}`,
     `Тон: ${options.tone ?? "живой и уверенный, как у практика"}`,
     `Жёсткий лимит: ${limit} символов включая пробелы. Уложись в него.`,
-  ];
+  );
 
   if (options.ctaRule) {
     parts.push(`Концовка поста: ${options.ctaRule}`);

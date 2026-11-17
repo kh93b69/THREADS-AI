@@ -1,4 +1,10 @@
-import { CTA_RULES, DEFAULT_TONE, pickTopic } from "../content/topics.js";
+import {
+  CTA_RULES,
+  DEFAULT_TONE,
+  SHORT_FORMAT_RULE,
+  SHORT_POST_LIMIT,
+  pickTopic,
+} from "../content/topics.js";
 import { ContentGenerator } from "../services/llm/ContentGenerator.js";
 import { Telegram, escapeTg } from "../services/notify/Telegram.js";
 import { ThreadsPoster } from "../services/poster/ThreadsPoster.js";
@@ -34,13 +40,21 @@ export async function runAutoPost(options: AutoPostOptions = {}): Promise<AutoPo
   const topic = options.topic ?? planned.topic;
   const tone = options.tone ?? planned.tone ?? DEFAULT_TONE;
 
-  log.info("Готовлю пост", { topic, slotIndex });
+  log.info("Готовлю пост", { topic, slotIndex, format: planned.format ?? "normal" });
 
   const telegram = new Telegram();
 
   try {
     const ctaRule = planned.cta ? CTA_RULES[planned.cta] : undefined;
-    const text = await new ContentGenerator().generatePost({ topic, tone, ctaRule });
+    const isShort = planned.format === "short";
+
+    const text = await new ContentGenerator().generatePost({
+      topic,
+      tone,
+      ctaRule,
+      formatRule: isShort ? SHORT_FORMAT_RULE : undefined,
+      maxChars: isShort ? SHORT_POST_LIMIT : undefined,
+    });
     const result = await ThreadsPoster.fromEnv().publish({ text });
 
     log.info("Пост опубликован", {
