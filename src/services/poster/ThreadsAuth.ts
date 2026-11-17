@@ -7,8 +7,18 @@ const log = createLogger("auth");
 /** Страница авторизации, куда уходит пользователь. Это не graph-хост. */
 const THREADS_AUTHORIZE_URL = "https://threads.com/oauth/authorize";
 
-/** Права, которые просим. threads_basic обязателен и не убирается. */
-const SCOPES = ["threads_basic", "threads_content_publish"];
+/**
+ * Права, которые просим. threads_basic обязателен и не убирается.
+ * read_replies и manage_insights нужны для сводок по комментариям и лайкам —
+ * после их добавления в настройках приложения нужно пройти /auth/start заново,
+ * старый токен выдан без них.
+ */
+const SCOPES = [
+  "threads_basic",
+  "threads_content_publish",
+  "threads_read_replies",
+  "threads_manage_insights",
+];
 
 interface ShortLivedResponse {
   access_token: string;

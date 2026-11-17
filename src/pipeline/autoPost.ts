@@ -1,5 +1,6 @@
 import { DEFAULT_TONE, pickTopic } from "../content/topics.js";
 import { ContentGenerator } from "../services/llm/ContentGenerator.js";
+import { Telegram, escapeTg } from "../services/notify/Telegram.js";
 import { ThreadsPoster } from "../services/poster/ThreadsPoster.js";
 import type { PublishResult } from "../types/index.js";
 import { createLogger } from "../utils/logger.js";
@@ -35,14 +36,42 @@ export async function runAutoPost(options: AutoPostOptions = {}): Promise<AutoPo
 
   log.info("Готовлю пост", { topic, slotIndex });
 
-  const text = await new ContentGenerator().generatePost({ topic, tone });
-  const result = await ThreadsPoster.fromEnv().publish({ text });
+  const telegram = new Telegram();
 
-  log.info("Пост опубликован", {
-    threadId: result.threadId,
-    permalink: result.permalink,
-    length: text.length,
-  });
+  try {
+    const text = await new ContentGenerator().generatePost({ topic, tone });
+    const result = await ThreadsPoster.fromEnv().publish({ text });
 
-  return { ...result, topic, text };
+    log.info("Пост опубликован", {
+      threadId: result.threadId,
+      permalink: result.permalink,
+      length: text.length,
+    });
+
+    await telegram.send(
+      [
+        "✅ <b>Пост опубликован</b>",
+        "",
+        escapeTg(text),
+        "",
+        `<i>Тема: ${escapeTg(topic)}</i>`,
+        result.permalink ? `\n${escapeTg(result.permalink)}` : "",
+      ].join("\n"),
+    );
+
+    return { ...result, topic, text };
+  } catch (error) {
+    // Про неудачу важнее узнать, чем про успех: молчащий бот выглядит так же,
+    // как работающий.
+    await telegram.send(
+      [
+        "❌ <b>Пост НЕ вышел</b>",
+        "",
+        escapeTg(ThreadsPoster.explainError(error)),
+        "",
+        `<i>Тема: ${escapeTg(topic)}</i>`,
+      ].join("\n"),
+    );
+    throw error;
+  }
 }

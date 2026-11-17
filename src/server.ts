@@ -7,6 +7,7 @@ import { ContentGenerator } from "./services/llm/ContentGenerator.js";
 import { ApifyParser } from "./services/parser/ApifyParser.js";
 import { MockParser } from "./services/parser/MockParser.js";
 import type { ThreadsParser } from "./services/parser/ThreadsParser.js";
+import { Telegram } from "./services/notify/Telegram.js";
 import { ThreadsAuth } from "./services/poster/ThreadsAuth.js";
 import { ThreadsPoster } from "./services/poster/ThreadsPoster.js";
 import { Scheduler } from "./services/scheduler/Scheduler.js";
@@ -69,6 +70,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (route === "GET /panel") return panel(res);
   if (route === "POST /panel/publish") return panelPublish(res);
+  if (route === "GET /tg/setup") return tgSetup(res);
+  if (route === "POST /tg/test") return tgTest(res);
 
   switch (route) {
     case "GET /schedule":
@@ -219,6 +222,69 @@ THREADS_USER_ID=${escapeHtml(result.userId)}</pre>
   }
 }
 
+/** Показывает chat_id всех, кто писал боту — чтобы не лезть в API руками. */
+async function tgSetup(res: ServerResponse): Promise<void> {
+  const secretParam = API_SECRET ? `?secret=${encodeURIComponent(API_SECRET)}` : "";
+  try {
+    const chats = await new Telegram().findChats();
+
+    if (chats.length === 0) {
+      return html(
+        res,
+        200,
+        `<h1>Напиши боту</h1>
+         <p>Открой бота в Телеграме, нажми <b>Start</b> и отправь любое сообщение.
+         Потом обнови эту страницу.</p>
+         <p><a href="/panel${secretParam}">← назад</a></p>`,
+      );
+    }
+
+    return html(
+      res,
+      200,
+      `<h1>Нашёл чаты</h1>
+       <p>Скопируй нужный id в переменную <code>TELEGRAM_CHAT_ID</code> в Railway:</p>
+       ${chats
+         .map(
+           (chat) =>
+             `<pre>TELEGRAM_CHAT_ID=${chat.id}</pre><p class="hint">${escapeHtml(chat.name)} · ${escapeHtml(chat.type)}</p>`,
+         )
+         .join("")}
+       <p><a href="/panel${secretParam}">← назад</a></p>`,
+    );
+  } catch (error) {
+    return html(res, 502, `<h1>Не получилось</h1><pre>${escapeHtml(String(error))}</pre>`);
+  }
+}
+
+/** Кнопка «проверить Телеграм» на панели. */
+async function tgTest(res: ServerResponse): Promise<void> {
+  const secretParam = API_SECRET ? `?secret=${encodeURIComponent(API_SECRET)}` : "";
+  const telegram = new Telegram();
+
+  if (!telegram.configured) {
+    return html(
+      res,
+      400,
+      `<h1>Телеграм не настроен</h1>
+       <p>Нужны переменные <code>TELEGRAM_BOT_TOKEN</code> и <code>TELEGRAM_CHAT_ID</code>.</p>
+       <p><a href="/tg/setup${secretParam}">Найти chat_id</a> · <a href="/panel${secretParam}">← назад</a></p>`,
+    );
+  }
+
+  const sent = await telegram.send(
+    `🔧 <b>Проверка связи</b>\nThreads Machine на связи. Сюда будут приходить уведомления о постах.`,
+  );
+
+  return html(
+    res,
+    sent ? 200 : 502,
+    `<h1>${sent ? "Отправил" : "Не отправилось"}</h1>
+     <p>${sent ? "Посмотри в Телеграм." : "Проверь TELEGRAM_CHAT_ID и что ты писал боту."}</p>
+     <p><a href="/panel${secretParam}">← назад</a></p>`,
+  );
+}
+
 /** Страница управления: всё состояние и кнопка «опубликовать» в одном месте. */
 function panel(res: ServerResponse): void {
   const times = config.autopost.times;
@@ -257,6 +323,16 @@ function panel(res: ServerResponse): void {
      <form method="POST" action="/panel/publish${secretParam}">
        <button type="submit">Написать и опубликовать пост</button>
      </form>
+     <h2>Телеграм</h2>
+     <p>${new Telegram().configured
+        ? "✅ Настроен — уведомления о постах приходят в чат."
+        : "⚠️ Не настроен. Нужны TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID."}</p>
+     <p>
+       <form method="POST" action="/tg/test${secretParam}" style="display:inline">
+         <button type="submit">Отправить тестовое сообщение</button>
+       </form>
+       &nbsp;<a href="/tg/setup${secretParam}">Найти мой chat_id</a>
+     </p>
      <p class="hint">Темы правятся в файле src/content/topics.ts — пушишь в GitHub, Railway сам обновляется.</p>`,
   );
 }
