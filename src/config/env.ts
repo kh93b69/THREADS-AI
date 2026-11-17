@@ -35,6 +35,17 @@ export const config = {
     get accessToken(): string {
       return str("THREADS_ACCESS_TOKEN");
     },
+    /** Threads app ID — не ID основного приложения Meta. */
+    get appId(): string {
+      return str("THREADS_APP_ID");
+    },
+    get appSecret(): string {
+      return str("THREADS_APP_SECRET");
+    },
+    /** Должен совпадать байт в байт с тем, что вписан в настройках Meta. */
+    get redirectUri(): string {
+      return `${str("PUBLIC_URL").replace(/\/$/, "")}/auth/callback`;
+    },
     get userId(): string {
       return str("THREADS_USER_ID");
     },
@@ -86,7 +97,8 @@ export const config = {
   },
 } as const;
 
-/** Константы домена Threads. */
-export const THREADS_GRAPH_BASE = "https://graph.threads.net";
+/** Константы домена Threads. Meta поддерживает и .com, и .net. */
+export const THREADS_GRAPH_BASE =
+  process.env["THREADS_GRAPH_BASE"]?.trim() || "https://graph.threads.com";
 /** Жёсткий лимит Meta на длину текстового поста. */
 export const THREADS_TEXT_LIMIT = 500;

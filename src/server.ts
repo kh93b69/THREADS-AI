@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { config } from "./config/env.js";
 import { runAutoPost } from "./pipeline/autoPost.js";
@@ -5,6 +6,7 @@ import { ContentGenerator } from "./services/llm/ContentGenerator.js";
 import { ApifyParser } from "./services/parser/ApifyParser.js";
 import { MockParser } from "./services/parser/MockParser.js";
 import type { ThreadsParser } from "./services/parser/ThreadsParser.js";
+import { ThreadsAuth } from "./services/poster/ThreadsAuth.js";
 import { ThreadsPoster } from "./services/poster/ThreadsPoster.js";
 import { Scheduler } from "./services/scheduler/Scheduler.js";
 import { createLogger } from "./utils/logger.js";
@@ -19,6 +21,8 @@ const API_SECRET = process.env.API_SECRET?.trim();
  * HTTP-обёртка над сервисами — то, что крутится на Railway.
  *
  *   GET  /health            → проверка живости (Railway пингует её сам)
+ *   GET  /auth/start        → получение токена Meta: открыть в браузере
+ *   GET  /auth/callback     → сюда Threads возвращает после разрешения доступа
  *   GET  /schedule          → расписание автопостинга и когда следующий пост
  *   POST /publish           → { topic } или { text } → пост в Threads
  *   POST /publish/auto      → пост по контент-плану, прямо сейчас
@@ -40,6 +44,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (route === "GET /health") {
     return json(res, 200, { ok: true, uptime: Math.round(process.uptime()) });
   }
+
+  if (route === "GET /auth/start") return authStart(url, res);
+  if (route === "GET /auth/callback") return authCallback(url, res);
 
   if (API_SECRET && req.headers["x-api-secret"] !== API_SECRET) {
     return json(res, 401, { error: "Неверный x-api-secret." });
@@ -86,6 +93,77 @@ async function publish(body: Record<string, unknown>, res: ServerResponse): Prom
   }
 }
 
+/**
+ * Одноразовые state для OAuth: защита от того, что кто-то дёрнет /auth/callback
+ * со своим кодом. Живут в памяти — этого достаточно, поток занимает полминуты.
+ */
+const pendingStates = new Set<string>();
+
+/**
+ * Старт OAuth. Открывается в браузере, поэтому заголовок передать нельзя —
+ * секрет идёт в query: /auth/start?secret=...
+ */
+function authStart(url: URL, res: ServerResponse): void {
+  if (API_SECRET && url.searchParams.get("secret") !== API_SECRET) {
+    return html(res, 401, "<h1>Неверный secret</h1><p>Открой ссылку с ?secret=&lt;API_SECRET&gt;</p>");
+  }
+
+  try {
+    const state = randomUUID();
+    pendingStates.add(state);
+    // Чтобы забытые state не копились, если поток бросили на половине.
+    setTimeout(() => pendingStates.delete(state), 10 * 60_000).unref();
+
+    const target = new ThreadsAuth().buildAuthorizeUrl(state);
+    log.info("Отправляю на авторизацию Threads");
+    res.writeHead(302, { Location: target });
+    res.end();
+  } catch (error) {
+    html(res, 500, `<h1>Не настроено</h1><pre>${escapeHtml(String(error))}</pre>`);
+  }
+}
+
+/** Threads возвращает сюда с ?code=... — меняем его на долгоживущий токен. */
+async function authCallback(url: URL, res: ServerResponse): Promise<void> {
+  const error = url.searchParams.get("error_description") ?? url.searchParams.get("error");
+  if (error) {
+    return html(res, 400, `<h1>Доступ не выдан</h1><p>${escapeHtml(error)}</p>`);
+  }
+
+  const state = url.searchParams.get("state");
+  if (!state || !pendingStates.delete(state)) {
+    return html(
+      res,
+      400,
+      "<h1>Неизвестный state</h1><p>Начни заново с /auth/start?secret=&lt;API_SECRET&gt;</p>",
+    );
+  }
+
+  const code = url.searchParams.get("code");
+  if (!code) return html(res, 400, "<h1>Нет параметра code</h1>");
+
+  try {
+    const result = await new ThreadsAuth().exchangeCode(code);
+    log.info("Токен получен, осталось записать его в переменные Railway", {
+      userId: result.userId,
+      expiresAt: result.expiresAt,
+    });
+
+    return html(
+      res,
+      200,
+      `<h1>Готово</h1>
+       <p>Скопируй обе строки в Railway → Variables, затем поставь <code>DRY_RUN=false</code> и передеплой.</p>
+       <pre>THREADS_ACCESS_TOKEN=${escapeHtml(result.accessToken)}
+THREADS_USER_ID=${escapeHtml(result.userId)}</pre>
+       <p>Токен действует до <b>${escapeHtml(result.expiresAt)}</b> (60 дней).
+       Продлевать: <code>npm run test:token</code> раз в ~50 дней.</p>`,
+    );
+  } catch (err) {
+    return html(res, 502, `<h1>Обмен не удался</h1><pre>${escapeHtml(String(err))}</pre>`);
+  }
+}
+
 /** Ручной запуск того же пайплайна, что крутит планировщик. */
 async function publishAuto(res: ServerResponse): Promise<void> {
   try {
@@ -113,6 +191,28 @@ async function parse(body: Record<string, unknown>, res: ServerResponse): Promis
   });
 
   return json(res, 200, { parser: parser.name, count: threads.length, threads });
+}
+
+/** Ответ для браузера: OAuth-поток человек проходит глазами, не curl-ом. */
+function html(res: ServerResponse, status: number, body: string): void {
+  const page = `<!doctype html><meta charset="utf-8">
+<title>Threads Machine</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem}
+pre{background:#f4f4f5;padding:1rem;border-radius:8px;overflow-x:auto;white-space:pre-wrap;word-break:break-all}</style>
+${body}`;
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": Buffer.byteLength(page),
+  });
+  res.end(page);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function json(res: ServerResponse, status: number, payload: unknown): void {

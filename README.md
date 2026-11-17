@@ -36,7 +36,31 @@ npm run typecheck
 2. `npm run test:post -- "Привет из API"` — проверь, что `whoami` вернул твой аккаунт.
 3. Убери `DRY_RUN` и повтори — пост уйдёт по-настоящему.
 
-## Получение токена Meta
+## Получение токена Meta — через /auth/start
+
+Сервис умеет проводить OAuth сам, вручную дёргать `curl` не нужно.
+
+**Один раз в настройках приложения Meta:**
+- Use cases → Access the Threads API → права `threads_basic` и `threads_content_publish`
+- App roles → **Threads Tester** → пригласить свой профиль и принять приглашение в настройках Threads
+- Settings → **Redirect Callback URL**: `<PUBLIC_URL>/auth/callback`
+- Оттуда же скопировать **Threads app ID** и **Threads app secret** (не ID основного приложения!)
+
+**Переменные:**
+```
+PUBLIC_URL=https://твой-домен.up.railway.app
+THREADS_APP_ID=...
+THREADS_APP_SECRET=...
+```
+
+**Поток:** открыть в браузере `<PUBLIC_URL>/auth/start?secret=<API_SECRET>` → разрешить
+доступ → вернёшься на страницу с готовыми `THREADS_ACCESS_TOKEN` и `THREADS_USER_ID`,
+их остаётся вставить в Variables.
+
+Обмен идёт в два шага внутри одного запроса: код → short-lived токен (час) →
+long-lived (60 дней). App secret используется только на сервере.
+
+### Ручной путь (если нужен)
 
 Нужны скоупы `threads_basic` и `threads_content_publish`.
 
@@ -89,6 +113,8 @@ scripts/                           ручные тесты
 | Маршрут | Тело | Что делает |
 |---|---|---|
 | `GET /health` | — | проверка живости, её пингует Railway |
+| `GET /auth/start?secret=...` | — | начать OAuth, открывать в браузере |
+| `GET /auth/callback` | — | сюда Threads возвращает код (руками не трогать) |
 | `GET /schedule` | — | расписание и когда следующий пост |
 | `POST /publish/auto` | — | пост по контент-плану прямо сейчас |
 | `POST /publish` | `{"topic": "..."}` | генерит текст через LLM и публикует |
